@@ -1543,6 +1543,71 @@ do
 		hl.FillColor, hl.OutlineColor = espColor(), espColor()
 	end
 
+	--//----------------------- AUTO FARM: quest giver ---------------------------
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+	-- Quest -> nome do NPC. Só "Bandit" foi confirmado; os outros seguem o mesmo
+	-- padrão "<Quest> Quest Giver" e precisam ser conferidos no Workspace.NPCs.
+	local QuestGivers = {
+		["Bandit"]        = "Bandit Quest Giver",
+		["Monkey"]        = "Monkey Quest Giver",
+		["Gorilla"]       = "Gorilla Quest Giver",
+		["Pirate"]        = "Pirate Quest Giver",
+		["Brute"]         = "Brute Quest Giver",
+		["Desert Bandit"] = "Desert Bandit Quest Giver",
+	}
+	local Quests = { "Bandit", "Monkey", "Gorilla", "Pirate", "Brute", "Desert Bandit" }
+
+	local QUEST_REFRESH = 60 -- segundos até falar com o NPC de novo
+	local Farm = { LastQuest = nil :: string?, LastTalk = 0 :: number }
+
+	local function resetFarm()
+		Farm.LastQuest, Farm.LastTalk = nil, 0
+	end
+
+	-- fala com o NPC da quest (retorna true/false); WaitForChild com timeout: nunca trava
+	local function talkToQuestGiver(quest: string): boolean
+		local npcName = QuestGivers[quest]
+		if not npcName then return false end
+		local ok, err = pcall(function()
+			local npcs = Workspace:WaitForChild("NPCs", 5)
+			local npc = npcs and npcs:WaitForChild(npcName, 5)
+			local remotes = ReplicatedStorage:WaitForChild("Remotes", 5)
+			local talk = remotes and remotes:WaitForChild("OnTalkToNPC", 5)
+			assert(npc and talk, "NPC ou remote não encontrado: " .. npcName)
+			local args = { npc }
+			talk:FireServer(unpack(args))
+		end)
+		if not ok then warn("[BloxHub:Quest] " .. tostring(err)) end
+		return ok
+	end
+
+	--//-------------------------- AUTO ATTACK (remote) --------------------------
+	local AttackArgs = { 0.5, 3 } -- argumentos do RegisterAttack (do seu código)
+	local attackRemote: Instance? = nil
+
+	-- procura o remote uma vez e guarda em cache; refaz se ele for removido
+	local function getAttackRemote(): Instance?
+		if attackRemote and attackRemote.Parent then return attackRemote end
+		local ok, remote = pcall(function()
+			local modules = ReplicatedStorage:WaitForChild("Modules", 5)
+			local net = modules and modules:WaitForChild("Net", 5)
+			return net and net:WaitForChild("RE/RegisterAttack", 5)
+		end)
+		attackRemote = ok and remote or nil
+		return attackRemote
+	end
+
+	local function fireAttack(): boolean
+		local remote = getAttackRemote()
+		if not remote then return false end
+		local ok, err = pcall(function()
+			remote:FireServer(unpack(AttackArgs))
+		end)
+		if not ok then warn("[BloxHub:Attack] " .. tostring(err)) end
+		return ok
+	end
+
 	--//-------------------- STEPS (um por feature de motor) ---------------------
 	-- A lógica específica do jogo entra nos blocos  >>> ... <<<
 	local Steps = {}
@@ -1551,7 +1616,20 @@ do
 		if not isAlive() then return end
 		local quest = State.Selected.Quest
 		local speed = State.Values.FarmSpeed or 1
-		-- >>> seu código de auto farm aqui (usa `quest` e `speed`) <<<
+
+		-- 1) pega a quest: ao ligar, ao trocar de quest e a cada QUEST_REFRESH segundos
+		local now = os.clock()
+		if quest ~= Farm.LastQuest or now - Farm.LastTalk >= QUEST_REFRESH then
+			Farm.LastQuest, Farm.LastTalk = quest, now -- marca antes: evita repetir se demorar
+			talkToQuestGiver(quest)
+		end
+
+		-- 2) >>> seu código de atacar os inimigos da quest aqui (usa `speed`) <<<
+	end
+
+	function Steps.AutoAttack(dt: number)
+		if not isAlive() then return end
+		fireAttack()
 	end
 
 	function Steps.MasteryFarm(dt: number)
@@ -1693,8 +1771,6 @@ do
 
 	--//-------------------------- FEATURE REGISTRY ------------------------------
 	-- Dados puros: sem textos de exibição além do Name de cada controle.
-	local Quests = { "Bandit", "Monkey", "Gorilla", "Pirate", "Brute", "Desert Bandit" }
-
 	local Features = {
 		--// HOME
 		{ Id = "AutoFarmHome",  Alias = "AutoFarm",  Name = "Auto Farm",  Tab = "Home", Section = "Atalhos", Type = "Toggle" },
@@ -1706,7 +1782,7 @@ do
 
 		--// FARM
 		{ Id = "AutoFarm",    Name = "Auto Farm",    Tab = "Farm", Section = "Farm", Type = "Toggle",
-		  Step = Steps.AutoFarm, Tick = 0.1, Notify = true },
+		  Step = Steps.AutoFarm, Tick = 0.1, Notify = true, OnStop = resetFarm },
 		{ Id = "Quest",       Name = "Quest",        Tab = "Farm", Section = "Farm", Type = "Dropdown",
 		  Options = Quests, Default = Quests[1],
 		  Callback = function(v) State.Selected.Quest = v end },
@@ -1720,6 +1796,10 @@ do
 		  Step = Steps.KillAura, Tick = 0.1, Notify = true },
 		{ Id = "AuraRange",   Name = "Range",        Tab = "Combat", Section = "Ataque", Type = "Slider",
 		  Min = 5, Max = 100, Default = 30, Step = 1 },
+		{ Id = "AutoAttack",  Name = "Auto Attack",  Tab = "Combat", Section = "Ataque", Type = "Toggle",
+		  Step = Steps.AutoAttack, Tick = 0.1, TickKey = "AttackDelay", Notify = true },
+		{ Id = "AttackDelay", Name = "Attack Delay (s)", Tab = "Combat", Section = "Ataque", Type = "Slider",
+		  Min = 0.05, Max = 1, Default = 0.1, Step = 0.05 },
 		{ Id = "AutoDodge",   Name = "Auto Dodge",   Tab = "Combat", Section = "Defesa", Type = "Toggle",
 		  Step = Steps.AutoDodge, Tick = 0.05, Notify = true },
 		{ Id = "Aimbot",      Name = "Aimbot",       Tab = "Combat", Section = "Mira", Type = "Toggle",
@@ -1882,7 +1962,7 @@ do
 		local now = os.clock()
 		for _, f in ipairs(Features) do -- for genérico sobre a registry
 			if f.Step and State.Active[f.Id] then
-				local interval = f.Tick or Config.TickDefault
+				local interval = (f.TickKey and State.Values[f.TickKey]) or f.Tick or Config.TickDefault
 				if now - (lastRun[f.Id] or 0) >= interval then
 					lastRun[f.Id] = now
 					if f.Inline then
